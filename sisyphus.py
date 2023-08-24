@@ -50,13 +50,15 @@ def _main() -> None:
     logger.debug("Parsing user arguments")
     user_args = parser.parse_args()
     
+    user_args, engine, metadata, table_names = _process_user_args(logger, user_args)
+    
     # Process user arguments to obtain file list, SQL Alchemy engine, etc.
     _process_user_args(logger, user_args)
     
 def _process_user_args(logger: logging.Logger, user_args: argparse.Namespace) -> tuple[
         argparse.Namespace,
         sa.Engine,
-        sa.Metadata,
+        sa.MetaData,
         dict[pathlib.Path, str]
     ]:    
     
@@ -86,9 +88,10 @@ def _process_user_args(logger: logging.Logger, user_args: argparse.Namespace) ->
         # Test regex match
         match = regex.search(file_name)
         if not match:
-            logger.error(f"File name {file_name} does not match the regex {user_args.regex_suffix}")
+            err_string = f"File name {file_name} does not match the regex {user_args.regex_suffix}"
+            logger.error(err_string)
             logger.debug(f"Regex: {user_args.regex_suffix}")
-            raise ValueError(f"File name {file_name} does not match the regex {user_args.regex_suffix}")
+            raise ValueError(err_string)
         
         # Obtain table name
         table_name = file_name[:match.start()]
@@ -118,10 +121,16 @@ def _process_user_args(logger: logging.Logger, user_args: argparse.Namespace) ->
     logger.debug("Reflecting metadata")
     metadata = sa.MetaData()
     metadata.reflect(bind=engine, schema=user_args.schema or None)
+    logger.info(f"Obtained metadata for schema {metadata.schema} containing {len(metadata.tables)} tables")
     
-    # Test if all tables exist in the database
-    logger.debug("Testing if all tables exist in the database")
+    # Test if all required tables exist in the database
+    logger.debug("Testing if all the tables exist in the database")
     for file_name, table_name in table_names.items():
         if table_name not in metadata.tables:
-            logger.error(f"Table {table_name} corresponding to {file_name} is not found in the database")
-            raise ValueError(f"Table {table_name} not found in the database")
+            err_string = f"Table {table_name} corresponding to {file_name} is not found in the database"
+            logger.error(err_string)
+            raise ValueError(err_string)
+
+    return user_args, engine, metadata, table_names
+        
+    
