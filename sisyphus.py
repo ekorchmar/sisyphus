@@ -6,6 +6,15 @@ import pandas as pd
 import sqlalchemy as sa
 from concurrent.futures import ThreadPoolExecutor
 
+from typing import Type
+
+_DTYPE_CONVERSION_DICT: dict[Type, Type] = {
+    sa.Integer: pd.Int64Dtype,
+    sa.Float: pd.Float64Dtype,
+    sa.String: pd.StringDtype,
+    sa.DateTime: pd.DatetimeTZDtype,
+    }
+
 def _main() -> None:
     logger = _obtain_logger()
     parser = _obtain_arg_parser()
@@ -54,7 +63,6 @@ def _obtain_arg_parser() -> argparse.ArgumentParser:
                                 "all files in the directory will be processed")
     execution_args.add_argument("--regex-suffix", "-r", type=str, default=r"\.csv", help="Regex to extract table names "
                                 "from file names through removal")
-    execution_args.add_argument("--no-headers", "-H", action="store_true", default=False, help="Files have no headers")
     execution_args.add_argument("--sep", "-e", type=str, default=",", help="Separator to assume when reading CSV files")
     execution_args.add_argument("--execute_first", "-x", type=str, default="", help="Path to SQL script to execute " 
                                 "before uploading")
@@ -157,19 +165,19 @@ def _process_file(
     
     # Obtain dtype dict from table metadata
     logger.debug("Obtaining dtype dict from table metadata")
-    sql_type_dict = {}
+    sql_type_column_dict = {}
     for column in metadata.tables[table_name].columns:
-        sql_type_dict[column.name] = column.type
+        sql_type_column_dict[column.name] = column.type
         
     # Apply type conversion to the dtype dict
+    dtype_column_dict = {col: _convert_dtype(type_) for col, type_ in sql_type_column_dict.items()}
     
     # Create file io stream
     pd_io = pd.read_csv(
         filepath_or_buffer=file_name,
         sep=user_args.sep or ',',
-        header=None if user_args.no_headers else 'infer',
-        dtype_backend='pyarrow',
         low_memory=True,
+        dtype=dtype_column_dict,
     )
 
 def _execute_sql(
@@ -187,6 +195,11 @@ def _execute_sql(
     # Reflect metadata anew to account for changes
     logger.debug("Reflecting metadata")
     metadata.reflect(bind=engine, schema=metadata.schema or None)
+
+def _convert_dtype(type_: Type) -> Type:
+    for sql_type, dtype in _DTYPE_CONVERSION_DICT.items():
+        if isinstance(type_(), sql_type):
+            return dtype
 
 if __name__ == "__main__":
     _main()
