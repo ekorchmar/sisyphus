@@ -4,6 +4,27 @@ import argparse
 import logging
 import pandas as pd
 import sqlalchemy as sa
+from concurrent.futures import ThreadPoolExecutor
+
+def _main() -> None:
+    logger = _obtain_logger()
+    parser = _obtain_arg_parser()
+    
+    logger.debug("Parsing user arguments")
+    user_args = parser.parse_args()
+    
+    # Process user arguments to obtain file list, SQL Alchemy engine, etc.
+    user_args, engine, metadata, table_names = _process_user_args(logger, user_args)
+    
+    if user_args.execute_first:
+        _execute_sql(logger, engine, metadata, user_args.execute_first)
+    
+    with ThreadPoolExecutor(max_workers=user_args.threads) as executor:
+        for file_name, table_name in table_names.items():
+            executor.submit(_process_file, logger, user_args, engine, metadata, file_name, table_name)
+            
+    if user_args.execute_last:
+        _execute_sql(logger, engine, metadata, user_args.execute_last)
 
 def _obtain_logger(default_logging_level: str = "INFO") -> logging.Logger:
     logger = logging.getLogger("OMOP Upload")
@@ -11,7 +32,7 @@ def _obtain_logger(default_logging_level: str = "INFO") -> logging.Logger:
     logger.info("Initializing Sisyphus. Developed by Eduard Korchmar for the benefit of entire OHDSI community.")
     return logger
 
-def _obtain_parser()) -> argparse.ArgumentParser:
+def _obtain_arg_parser() -> argparse.ArgumentParser:
     user_args_parser = argparse.ArgumentParser(description="Upload OMOP Athena Downloads to an SQL database")
 
     sql_conn_args = user_args_parser.add_argument_group("SQL Connection Arguments")
@@ -28,33 +49,24 @@ def _obtain_parser()) -> argparse.ArgumentParser:
     execution_args.add_argument("--data-dir", "-d", type=str, help="Directory to read data from")
     execution_args.add_argument("--chunk-size", "-c", type=int, default=100000, help="Number of rows to upload "
                                 "at a time")
-    execution_args.add_argument("--ignore-constraints", "-i", action="store_true", default=False, 
-                                help="Naively ignore all present constraints. "
-                                "If unset, will attempt to drop and recreate after the insert instead")
+    execution_args.add_argument("--threads", "-T", type=int, default=5, help="Number of threads to use")
     execution_args.add_argument("--tables", "-t", type=str, nargs="+", default=[], help="File names to upload. If empty, "
                                 "all files in the directory will be processed")
     execution_args.add_argument("--regex-suffix", "-r", type=str, default=r"\.csv", help="Regex to extract table names "
                                 "from file names through removal")
     execution_args.add_argument("--no-headers", "-H", action="store_true", default=False, help="Files have no headers")
-    execution_args.add_argument("--sep", "-e", type=str, default=",", help="Separator to assume when redaing CSV files")
+    execution_args.add_argument("--sep", "-e", type=str, default=",", help="Separator to assume when reading CSV files")
+    execution_args.add_argument("--execute_first", "-x", type=str, default="", help="Path to SQL script to execute " 
+                                "before uploading")
+    execution_args.add_argument("--execute_last", "-X", type=str, default="", help="Path to SQL script to execute "
+                                "after uploading")
+
 
     technical_args = user_args_parser.add_argument_group("Technical Arguments")
     technical_args.add_argument("--log-level", "-l", type=str, default="INFO", help="Logging level to use")
     technical_args.add_argument("--dry-run", "-n", action="store_true", default=False, help="Don't actually upload data")
     return user_args_parser
-    
-def _main() -> None:
-    logger = _obtain_logger()
-    parser = _obtain_parser()
-    
-    logger.debug("Parsing user arguments")
-    user_args = parser.parse_args()
-    
-    user_args, engine, metadata, table_names = _process_user_args(logger, user_args)
-    
-    # Process user arguments to obtain file list, SQL Alchemy engine, etc.
-    _process_user_args(logger, user_args)
-    
+
 def _process_user_args(logger: logging.Logger, user_args: argparse.Namespace) -> tuple[
         argparse.Namespace,
         sa.Engine,
@@ -132,5 +144,49 @@ def _process_user_args(logger: logging.Logger, user_args: argparse.Namespace) ->
             raise ValueError(err_string)
 
     return user_args, engine, metadata, table_names
-        
+
+def _process_file(
+        logger: logging.Logger,
+        user_args: argparse.Namespace,
+        engine: sa.Engine,
+        metadata: sa.MetaData,
+        file_name: pathlib.Path,
+        table_name: str
+    ):
+    logger.info(f"Processing file {file_name} / table {table_name}")
     
+    # Obtain dtype dict from table metadata
+    logger.debug("Obtaining dtype dict from table metadata")
+    sql_type_dict = {}
+    for column in metadata.tables[table_name].columns:
+        sql_type_dict[column.name] = column.type
+        
+    # Apply type conversion to the dtype dict
+    
+    # Create file io stream
+    pd_io = pd.read_csv(
+        filepath_or_buffer=file_name,
+        sep=user_args.sep or ',',
+        header=None if user_args.no_headers else 'infer',
+        dtype_backend='pyarrow',
+        low_memory=True,
+    )
+
+def _execute_sql(
+        logger: logging.Logger,
+        engine: sa.Engine,
+        metadata: sa.MetaData,
+        script_path: pathlib.Path | str
+    ) -> None:
+    logger.info(f"Executing script {script_path}")
+    with engine.connect() as conn:
+        with pathlib.Path(script_path).open("r") as script_file:
+            sql = sa.text(script_file.read())
+            conn.execute(sql)
+
+    # Reflect metadata anew to account for changes
+    logger.debug("Reflecting metadata")
+    metadata.reflect(bind=engine, schema=metadata.schema or None)
+
+if __name__ == "__main__":
+    _main()
