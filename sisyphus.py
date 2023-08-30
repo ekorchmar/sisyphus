@@ -26,14 +26,15 @@ def _main() -> None:
     user_args, engine, metadata, table_names = _process_user_args(logger, user_args)
     
     if user_args.execute_first:
-        _execute_sql(logger, engine, metadata, user_args.execute_first)
+        _execute_sql(logger, engine, metadata, user_args.execute_first, user_args.dry_run)
     
+    logger.info(f"Starting upload with {user_args.threads} threads")
     with ThreadPoolExecutor(max_workers=user_args.threads) as executor:
         for file_name, table_name in table_names.items():
             executor.submit(_process_file, logger, user_args, engine, metadata, file_name, table_name)
             
     if user_args.execute_last:
-        _execute_sql(logger, engine, metadata, user_args.execute_last)
+        _execute_sql(logger, engine, metadata, user_args.execute_last, user_args.dry_run)
 
 def _obtain_logger(default_logging_level: str = "INFO") -> logging.Logger:
     logger = logging.getLogger("OMOP Upload")
@@ -172,21 +173,43 @@ def _process_file(
     # Apply type conversion to the dtype dict
     dtype_column_dict = {col: _convert_dtype(type_) for col, type_ in sql_type_column_dict.items()}
     
-    # Create file io stream
+    # Create file io reader through pandas
     pd_io = pd.read_csv(
         filepath_or_buffer=file_name,
         sep=user_args.sep or ',',
         low_memory=True,
         dtype=dtype_column_dict,
+        chunksize=user_args.chunk_size
     )
+    
+    for i, chunk in enumerate(pd_io):
+        logger.info(f"{table_name}: Uploading chunk {i} of length {len(chunk)}")
+        if user_args.dry_run:
+            logger.info("Dry run, skipping upload")
+        else:
+            chunk.to_sql(
+                name=table_name,
+                con=engine,
+                schema=metadata.schema or None,
+                if_exists="append",
+                index=False,
+                method="multi"
+            )
+        
 
 def _execute_sql(
         logger: logging.Logger,
         engine: sa.Engine,
         metadata: sa.MetaData,
-        script_path: pathlib.Path | str
+        script_path: pathlib.Path | str,
+        dry_run: bool = False
     ) -> None:
     logger.info(f"Executing script {script_path}")
+    
+    if dry_run:
+        logger.info("Dry run, skipping execution")
+        return
+    
     with engine.connect() as conn:
         with pathlib.Path(script_path).open("r") as script_file:
             sql = sa.text(script_file.read())
