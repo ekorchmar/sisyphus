@@ -5,6 +5,7 @@ import logging
 import pandas as pd
 import sqlalchemy as sa
 from concurrent.futures import ThreadPoolExecutor
+from functools import cache
 
 from typing import Type
 
@@ -219,6 +220,7 @@ def _execute_sql(
     logger.debug("Reflecting metadata")
     metadata.reflect(bind=engine, schema=metadata.schema or None)
 
+@cache
 def _convert_dtype(type_: Type) -> Type:
     for sql_type, dtype in _DTYPE_CONVERSION_DICT.items():
         if isinstance(type_(), sql_type):
